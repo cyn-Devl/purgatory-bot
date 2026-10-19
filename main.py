@@ -480,7 +480,7 @@ async def on_message(message):
         return
     await bot.process_commands(message)
     config = await guild_settings(message.guild.id, 'commands')
-    if config.get('enabled', True) and message.content.startswith('!'):
+    if config.get('enabled', True) and len(message.content) > 1 and message.content.startswith('!'):
         command_name = message.content[1:].split(maxsplit=1)[0].lower()
         for entry in config.get('entries', []):
             if isinstance(entry, dict) and entry.get('name') == command_name:
