@@ -13,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from openai import AsyncOpenAI
-from dashboard_settings import guild_settings, id_list, format_message
+from dashboard_settings import guild_settings, id_list, format_message, premium_active
 
 GUILD_ID = 1541574758641049670
 PURGATORY_ROLE_ID = 1555374207720755333
@@ -469,13 +469,19 @@ async def find_gif(query):
         return None
 
 
-async def speak(channel, prompt):
+async def speak(channel, prompt, *, premium_options=None):
     if not ai:
         return False
     # One response per channel per 12 seconds, including mentions.
     if time.monotonic() - last_reply[channel.id] < 12:
         return False
     last_reply[channel.id] = time.monotonic()
+    if premium_options:
+        personality = str(premium_options.get('personality', ''))[:400]
+        if personality:
+            prompt += '\nPremium personality preference: ' + personality
+        if premium_options.get('profanity') is not True:
+            prompt += '\nAvoid profanity.'
     async with channel.typing():
         answer = await ask_gemini(channel.id, prompt)
     if not answer or not answer.strip():
@@ -486,7 +492,7 @@ async def speak(channel, prompt):
     if answer:
         await post(channel, answer)
         chat_history[channel.id].append(('Gilbert', answer))
-    if gif_match and random.random() < GIF_CHANCE:
+    if gif_match and (premium_options is None or premium_options.get('gifEnabled') is True) and random.random() < GIF_CHANCE:
         gif_url = await find_gif(gif_match.group(1).strip())
         if gif_url:
             await post(channel, gif_url)
@@ -524,7 +530,15 @@ async def on_message(message):
                 if isinstance(response, str) and response:
                     await post(message.channel, format_message(response, message.author))
                 break
-    if message.channel.id != GENERAL_CHANNEL_ID or not message.content.strip():
+    premium = await guild_settings(message.guild.id, 'premium')
+    configured_channel = premium.get('channelId', '')
+    premium_channel = int(configured_channel) if str(configured_channel).isdigit() else None
+    paid_ai = (premium.get('aiEnabled') is True
+               and premium_channel == message.channel.id
+               and await premium_active(message.guild.id))
+    if not paid_ai and message.channel.id != GENERAL_CHANNEL_ID:
+        return
+    if not message.content.strip():
         return
     chat_history[message.channel.id].append(
         (message.author.display_name, message.content[:350]))
@@ -535,7 +549,8 @@ async def on_message(message):
     if mentioned or named:
         await speak(message.channel,
                     f'{message.author.display_name} addressed Gilbert: '
-                    f'{message.content[:500]}\nReply directly, briefly and with attitude.')
+                    f'{message.content[:500]}\nReply directly, briefly and with attitude.',
+                    premium_options=premium if paid_ai else None)
 
 
 @bot.event
