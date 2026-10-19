@@ -479,6 +479,15 @@ async def speak(channel, prompt, *, premium_options=None, guild_id=None):
     if time.monotonic() - last_reply[channel.id] < 12:
         return False
     last_reply[channel.id] = time.monotonic()
+    if premium_options is not None and guild_id is not None:
+        month = datetime.now(timezone.utc).strftime('%Y-%m')
+        limit = max(0, min(100000, int(premium_options.get('monthlyReplyLimit', 2000))))
+        async with usage_lock:
+            used = db.execute('SELECT replies FROM premium_usage WHERE guild_id=? AND month=?', (guild_id, month)).fetchone()
+            if used and used[0] >= limit or limit == 0:
+                return False
+            db.execute('INSERT INTO premium_usage(guild_id,month,replies) VALUES(?,?,1) ON CONFLICT(guild_id,month) DO UPDATE SET replies=replies+1', (guild_id, month))
+            db.commit()
     if premium_options:
         personality = str(premium_options.get('personality', ''))[:400]
         if personality:
