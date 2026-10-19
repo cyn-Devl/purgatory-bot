@@ -502,8 +502,8 @@ async def on_message(message):
         ignored = set(id_list(automod.get('ignoredChannelIds', '')))
         if message.channel.id not in ignored:
             content = message.content
-            invites = bool(re.search(r'(?:discord\\.gg/|discord(?:app)?\\.com/invite/)', content, re.I))
-            links = bool(re.search(r'https?://|www\\.', content, re.I))
+            invites = bool(re.search(r'(?:discord\.gg/|discord(?:app)?\.com/invite/)', content, re.I))
+            links = bool(re.search(r'https?://|www\.', content, re.I))
             mentions = len(set(message.raw_mentions)) + len(set(message.raw_role_mentions))
             blocked = ((automod.get('blockInvites') and invites)
                        or (automod.get('blockLinks') and links)
