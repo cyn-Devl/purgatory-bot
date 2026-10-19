@@ -132,7 +132,11 @@ async def post(channel, message):
 
 
 async def log(guild, title, description):
-    channel = guild.get_channel(LOG_CHANNEL_ID)
+    settings = await guild_settings(guild.id, 'logs')
+    purgatory = await guild_settings(guild.id, 'purgatory')
+    configured = settings.get('channelId') if settings.get('enabled') else purgatory.get('logChannelId')
+    channel_id = int(configured) if str(configured or '').isdigit() else LOG_CHANNEL_ID
+    channel = guild.get_channel(channel_id)
     if channel:
         try:
             await channel.send(embed=discord.Embed(
@@ -144,14 +148,21 @@ async def log(guild, title, description):
 
 async def imprison(member, moderator, kind='normal'):
     guild = member.guild
-    purg = guild.get_role(PURGATORY_ROLE_ID)
+    settings = await guild_settings(guild.id, 'purgatory')
+    if settings.get('enabled') is False:
+        return False, 'Purgatory is disabled in the dashboard.'
+    configured = settings.get('roleId')
+    purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
+    purg = guild.get_role(purg_id)
     if not purg:
         return False, 'Purgatory role not found.'
     if not guild.me or purg >= guild.me.top_role:
         return False, 'Move Gilbert above the Purgatory role.'
     if not target_ok(moderator, member):
         return False, 'Role hierarchy or permissions prevent this.'
-    if kind != 'deep' and names(member) & IMMUNE_ROLES:
+    immune_ids = set(id_list(settings.get('immuneRoleIds', '')))
+    if kind != 'deep' and (names(member) & IMMUNE_ROLES or
+                           any(role.id in immune_ids for role in member.roles)):
         return False, 'That member is immune to ordinary Purgatory.'
     if kind == 'deep' and (not guild.me.guild_permissions.moderate_members
                            or member.is_timed_out()):
@@ -162,7 +173,9 @@ async def imprison(member, moderator, kind='normal'):
             return False, 'Member is already in Purgatory.'
         saved = [r.id for r in member.roles if r != guild.default_role and not r.managed]
         managed = [r for r in member.roles if r.managed]
-        seconds = {'normal': None, 'deep': 120, 'random': 5}[kind]
+        configured_deep = settings.get('deepestPitsSeconds', 120)
+        deep_seconds = configured_deep if isinstance(configured_deep, int) and 1 <= configured_deep <= 2419200 else 120
+        seconds = {'normal': None, 'deep': deep_seconds, 'random': 5}[kind]
         expires = (now() + timedelta(seconds=seconds)).isoformat() if seconds else None
         # Persist first so a restart does not lose the original roles.
         db.execute('INSERT INTO punishments VALUES (?,?,?,?,?)',
@@ -171,7 +184,7 @@ async def imprison(member, moderator, kind='normal'):
         try:
             await member.edit(roles=managed + [purg], reason=f'{kind} Purgatory by {moderator}')
             if kind == 'deep':
-                await member.timeout(timedelta(minutes=2), reason=f'Deepest Pits by {moderator}')
+                await member.timeout(timedelta(seconds=deep_seconds), reason=f'Deepest Pits by {moderator}')
         except discord.HTTPException as exc:
             # If role removal succeeded but timeout failed, retain the backup
             # and schedule immediate recovery rather than losing saved roles.
@@ -274,7 +287,10 @@ async def randompurg(interaction: discord.Interaction):
     if not permitted(interaction.user):
         return await feedback(interaction, 'You cannot use this command.')
     await interaction.response.defer(ephemeral=True)
-    purg = interaction.guild.get_role(PURGATORY_ROLE_ID)
+    settings = await guild_settings(interaction.guild.id, 'purgatory')
+    configured = settings.get('roleId')
+    purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
+    purg = interaction.guild.get_role(purg_id)
     candidates = [m for m in interaction.guild.members
                   if not m.bot and not (names(m) & IMMUNE_ROLES)
                   and target_ok(interaction.user, m) and not record(m)
@@ -373,7 +389,10 @@ class PurgatoryView(discord.ui.View):
 async def viewpurgatory(interaction: discord.Interaction):
     if not permitted(interaction.user):
         return await feedback(interaction, 'You cannot use this command.')
-    role = interaction.guild.get_role(PURGATORY_ROLE_ID)
+    settings = await guild_settings(interaction.guild.id, 'purgatory')
+    configured = settings.get('roleId')
+    purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
+    role = interaction.guild.get_role(purg_id)
     if not role:
         return await feedback(interaction, 'Purgatory role not found.')
     view = PurgatoryView(list(role.members), interaction.user.id)
@@ -543,11 +562,10 @@ async def on_ready():
     if not auto_release.is_running():
         auto_release.start()
     if not getattr(bot, 'synced', False):
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
+        # Global registration allows Gilbert to work in every installed guild.
+        synced = await bot.tree.sync()
         bot.synced = True
-        print(f'Synced {len(synced)} slash commands')
+        print(f'Synced {len(synced)} global slash commands')
     if not ai:
         print('GEMINI_API_KEY missing; AI chat is disabled.')
     if not GIPHY_API_KEY:
