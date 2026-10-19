@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from openai import AsyncOpenAI
+from dashboard_settings import guild_settings, id_list, format_message
 
 GUILD_ID = 1541574758641049670
 PURGATORY_ROLE_ID = 1555374207720755333
@@ -131,7 +132,11 @@ async def post(channel, message):
 
 
 async def log(guild, title, description):
-    channel = guild.get_channel(LOG_CHANNEL_ID)
+    settings = await guild_settings(guild.id, 'logs')
+    purgatory = await guild_settings(guild.id, 'purgatory')
+    configured = settings.get('channelId') if settings.get('enabled') else purgatory.get('logChannelId')
+    channel_id = int(configured) if str(configured or '').isdigit() else LOG_CHANNEL_ID
+    channel = guild.get_channel(channel_id)
     if channel:
         try:
             await channel.send(embed=discord.Embed(
@@ -143,14 +148,21 @@ async def log(guild, title, description):
 
 async def imprison(member, moderator, kind='normal'):
     guild = member.guild
-    purg = guild.get_role(PURGATORY_ROLE_ID)
+    settings = await guild_settings(guild.id, 'purgatory')
+    if settings.get('enabled') is False and settings.get('roleId'):
+        return False, 'Purgatory is disabled in the dashboard.'
+    configured = settings.get('roleId')
+    purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
+    purg = guild.get_role(purg_id)
     if not purg:
         return False, 'Purgatory role not found.'
     if not guild.me or purg >= guild.me.top_role:
         return False, 'Move Gilbert above the Purgatory role.'
     if not target_ok(moderator, member):
         return False, 'Role hierarchy or permissions prevent this.'
-    if kind != 'deep' and names(member) & IMMUNE_ROLES:
+    immune_ids = set(id_list(settings.get('immuneRoleIds', '')))
+    if kind != 'deep' and (names(member) & IMMUNE_ROLES or
+                           any(role.id in immune_ids for role in member.roles)):
         return False, 'That member is immune to ordinary Purgatory.'
     if kind == 'deep' and (not guild.me.guild_permissions.moderate_members
                            or member.is_timed_out()):
@@ -161,7 +173,9 @@ async def imprison(member, moderator, kind='normal'):
             return False, 'Member is already in Purgatory.'
         saved = [r.id for r in member.roles if r != guild.default_role and not r.managed]
         managed = [r for r in member.roles if r.managed]
-        seconds = {'normal': None, 'deep': 120, 'random': 5}[kind]
+        configured_deep = settings.get('deepestPitsSeconds', 120)
+        deep_seconds = configured_deep if isinstance(configured_deep, int) and 1 <= configured_deep <= 2419200 else 120
+        seconds = {'normal': None, 'deep': deep_seconds, 'random': 5}[kind]
         expires = (now() + timedelta(seconds=seconds)).isoformat() if seconds else None
         # Persist first so a restart does not lose the original roles.
         db.execute('INSERT INTO punishments VALUES (?,?,?,?,?)',
@@ -170,7 +184,7 @@ async def imprison(member, moderator, kind='normal'):
         try:
             await member.edit(roles=managed + [purg], reason=f'{kind} Purgatory by {moderator}')
             if kind == 'deep':
-                await member.timeout(timedelta(minutes=2), reason=f'Deepest Pits by {moderator}')
+                await member.timeout(timedelta(seconds=deep_seconds), reason=f'Deepest Pits by {moderator}')
         except discord.HTTPException as exc:
             # If role removal succeeded but timeout failed, retain the backup
             # and schedule immediate recovery rather than losing saved roles.
@@ -273,7 +287,10 @@ async def randompurg(interaction: discord.Interaction):
     if not permitted(interaction.user):
         return await feedback(interaction, 'You cannot use this command.')
     await interaction.response.defer(ephemeral=True)
-    purg = interaction.guild.get_role(PURGATORY_ROLE_ID)
+    settings = await guild_settings(interaction.guild.id, 'purgatory')
+    configured = settings.get('roleId')
+    purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
+    purg = interaction.guild.get_role(purg_id)
     candidates = [m for m in interaction.guild.members
                   if not m.bot and not (names(m) & IMMUNE_ROLES)
                   and target_ok(interaction.user, m) and not record(m)
@@ -372,7 +389,10 @@ class PurgatoryView(discord.ui.View):
 async def viewpurgatory(interaction: discord.Interaction):
     if not permitted(interaction.user):
         return await feedback(interaction, 'You cannot use this command.')
-    role = interaction.guild.get_role(PURGATORY_ROLE_ID)
+    settings = await guild_settings(interaction.guild.id, 'purgatory')
+    configured = settings.get('roleId')
+    purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
+    role = interaction.guild.get_role(purg_id)
     if not role:
         return await feedback(interaction, 'Purgatory role not found.')
     view = PurgatoryView(list(role.members), interaction.user.id)
@@ -477,7 +497,33 @@ async def speak(channel, prompt):
 async def on_message(message):
     if message.author.bot or not message.guild:
         return
+    automod = await guild_settings(message.guild.id, 'automod')
+    if automod.get('enabled') and not message.author.guild_permissions.manage_messages:
+        ignored = set(id_list(automod.get('ignoredChannelIds', '')))
+        if message.channel.id not in ignored:
+            content = message.content
+            invites = bool(re.search(r'(?:discord\.gg/|discord(?:app)?\.com/invite/)', content, re.I))
+            links = bool(re.search(r'https?://|www\.', content, re.I))
+            mentions = len(set(message.raw_mentions)) + len(set(message.raw_role_mentions))
+            blocked = ((automod.get('blockInvites') and invites)
+                       or (automod.get('blockLinks') and links)
+                       or (mentions > (int(automod.get('maxMentions', 5)) if str(automod.get('maxMentions', 5)).isdigit() else 5)))
+            if blocked and message.channel.permissions_for(message.guild.me).manage_messages:
+                try:
+                    await message.delete()
+                    return
+                except discord.HTTPException:
+                    pass
     await bot.process_commands(message)
+    config = await guild_settings(message.guild.id, 'commands')
+    if config.get('enabled', True) and len(message.content) > 1 and message.content.startswith('!'):
+        command_name = message.content[1:].split(maxsplit=1)[0].lower()
+        for entry in config.get('entries', []):
+            if isinstance(entry, dict) and str(entry.get('name', '')).lower() == command_name:
+                response = entry.get('response', '')
+                if isinstance(response, str) and response:
+                    await post(message.channel, format_message(response, message.author))
+                break
     if message.channel.id != GENERAL_CHANNEL_ID or not message.content.strip():
         return
     chat_history[message.channel.id].append(
@@ -493,16 +539,96 @@ async def on_message(message):
 
 
 @bot.event
+async def on_member_join(member):
+    welcome = await guild_settings(member.guild.id, 'welcome')
+    if welcome.get('enabled'):
+        channel_id = welcome.get('channelId', '')
+        channel = member.guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+        if channel:
+            await post(channel, format_message(
+                welcome.get('message', 'Welcome {user} to {server}!'), member))
+
+    autoroles = await guild_settings(member.guild.id, 'autoroles')
+    if autoroles.get('enabled'):
+        selected = 'botRoleIds' if member.bot else 'roleIds'
+        me = member.guild.me
+        if me and me.guild_permissions.manage_roles:
+            roles = [member.guild.get_role(rid) for rid in id_list(autoroles.get(selected, ''))]
+            roles = [role for role in roles if role and not role.managed and role < me.top_role]
+            if roles:
+                try:
+                    await member.add_roles(*roles, reason='Gilbert dashboard autoroles')
+                except discord.HTTPException as exc:
+                    print('Autoroles error:', exc)
+
+
+@bot.event
+async def on_member_remove(member):
+    welcome = await guild_settings(member.guild.id, 'welcome')
+    if welcome.get('enabled') and welcome.get('goodbyeEnabled'):
+        channel_id = welcome.get('goodbyeChannelId', '')
+        channel = member.guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+        if channel:
+            await post(channel, format_message(
+                welcome.get('goodbyeMessage', 'Goodbye {user}.'), member))
+
+
+async def reaction_role_change(payload, add):
+    if not payload.guild_id or payload.user_id == bot.user.id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    settings = await guild_settings(guild.id, 'reaction-roles')
+    if not settings.get('enabled'):
+        return
+    member = guild.get_member(payload.user_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except discord.HTTPException:
+            return
+    me = guild.me
+    if not me or not me.guild_permissions.manage_roles:
+        return
+    for entry in settings.get('entries', []):
+        if not isinstance(entry, dict) or str(entry.get('messageId')) != str(payload.message_id):
+            continue
+        if str(entry.get('emoji')) != str(payload.emoji):
+            continue
+        role_id = entry.get('roleId', '')
+        role = guild.get_role(int(role_id)) if str(role_id).isdigit() else None
+        if not role or role.managed or role >= me.top_role:
+            continue
+        try:
+            if add:
+                await member.add_roles(role, reason='Gilbert reaction role')
+            else:
+                await member.remove_roles(role, reason='Gilbert reaction role')
+        except discord.HTTPException as exc:
+            print('Reaction role error:', exc)
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    await reaction_role_change(payload, True)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    await reaction_role_change(payload, False)
+
+
+@bot.event
 async def on_ready():
     print(f'Gilbert online as {bot.user}')
     if not auto_release.is_running():
         auto_release.start()
     if not getattr(bot, 'synced', False):
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
+        # Global registration allows Gilbert to work in every installed guild.
+        synced = await bot.tree.sync()
         bot.synced = True
-        print(f'Synced {len(synced)} slash commands')
+        print(f'Synced {len(synced)} global slash commands')
     if not ai:
         print('GEMINI_API_KEY missing; AI chat is disabled.')
     if not GIPHY_API_KEY:
