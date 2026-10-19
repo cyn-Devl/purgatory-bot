@@ -149,7 +149,7 @@ async def log(guild, title, description):
 async def imprison(member, moderator, kind='normal'):
     guild = member.guild
     settings = await guild_settings(guild.id, 'purgatory')
-    if settings.get('enabled') is False:
+    if settings.get('enabled') is False and settings.get('roleId'):
         return False, 'Purgatory is disabled in the dashboard.'
     configured = settings.get('roleId')
     purg_id = int(configured) if str(configured or '').isdigit() else PURGATORY_ROLE_ID
@@ -507,7 +507,7 @@ async def on_message(message):
             mentions = len(set(message.raw_mentions)) + len(set(message.raw_role_mentions))
             blocked = ((automod.get('blockInvites') and invites)
                        or (automod.get('blockLinks') and links)
-                       or (mentions > automod.get('maxMentions', 5)))
+                       or (mentions > (int(automod.get('maxMentions', 5)) if str(automod.get('maxMentions', 5)).isdigit() else 5)))
             if blocked and message.channel.permissions_for(message.guild.me).manage_messages:
                 try:
                     await message.delete()
@@ -519,10 +519,10 @@ async def on_message(message):
     if config.get('enabled', True) and len(message.content) > 1 and message.content.startswith('!'):
         command_name = message.content[1:].split(maxsplit=1)[0].lower()
         for entry in config.get('entries', []):
-            if isinstance(entry, dict) and entry.get('name') == command_name:
+            if isinstance(entry, dict) and str(entry.get('name', '')).lower() == command_name:
                 response = entry.get('response', '')
                 if isinstance(response, str) and response:
-                    await post(message.channel, response[:1900])
+                    await post(message.channel, format_message(response, message.author))
                 break
     if message.channel.id != GENERAL_CHANNEL_ID or not message.content.strip():
         return
