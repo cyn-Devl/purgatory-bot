@@ -57,3 +57,29 @@ def format_message(template, member):
     return (template.replace("{user}", member.mention)
                     .replace("{server}", member.guild.name)
                     .replace("{username}", member.display_name))[:1900]
+
+
+async def premium_active(guild_id):
+    """Fail closed when Stripe-backed entitlement cannot be verified."""
+    if not URL or not KEY:
+        return False
+    cache_key = (str(guild_id), "__premium_entitlement__")
+    entry = _cache.get(cache_key)
+    if entry and time.monotonic() - entry[0] < CACHE_SECONDS:
+        return entry[1]
+    try:
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(
+                f"{URL}/rest/v1/guild_subscriptions",
+                params={"guild_id": f"eq.{guild_id}", "select": "status", "limit": "1"},
+                headers={"apikey": KEY, "Authorization": f"Bearer {KEY}"},
+            ) as response:
+                response.raise_for_status()
+                rows = await response.json()
+        active = bool(rows and rows[0].get("status") in ("active", "trialing"))
+        _cache[cache_key] = (time.monotonic(), active)
+        return active
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, KeyError, TypeError) as exc:
+        print(f"Premium entitlement verification failed: {type(exc).__name__}")
+        return False
