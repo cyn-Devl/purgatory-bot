@@ -472,7 +472,7 @@ async def find_gif(query):
         return None
 
 
-async def speak(channel, prompt, *, premium_options=None):
+async def speak(channel, prompt, *, premium_options=None, guild_id=None):
     if not ai:
         return False
     # One response per channel per 12 seconds, including mentions.
@@ -553,7 +553,8 @@ async def on_message(message):
         await speak(message.channel,
                     f'{message.author.display_name} addressed Gilbert: '
                     f'{message.content[:500]}\nReply directly, briefly and with attitude.',
-                    premium_options=premium if paid_ai else None)
+                    premium_options=premium if paid_ai else None,
+                    guild_id=message.guild.id if paid_ai else None)
 
 
 @bot.event
