@@ -511,9 +511,34 @@ async def speak(channel, prompt, *, premium_options=None, guild_id=None):
     return bool(answer)
 
 
+@bot.tree.command(name="talk", description="Talk privately with Gilbert in DMs or in this channel")
+@app_commands.describe(message="What do you want to say to Gilbert?")
+async def talk(interaction: discord.Interaction, message: str):
+    if not ai:
+        await interaction.response.send_message("Gilbert's AI is unavailable right now.", ephemeral=True)
+        return
+    await interaction.response.defer(ephemeral=interaction.guild is not None)
+    channel_id = interaction.channel_id or interaction.user.id
+    chat_history[channel_id].append((interaction.user.display_name, message[:350]))
+    answer = await ask_gemini(channel_id, f'{interaction.user.display_name} asked Gilbert: {message[:1000]}\\nReply conversationally.')
+    if not answer:
+        await interaction.followup.send("Gilbert couldn't answer right now. Try again.", ephemeral=interaction.guild is not None)
+        return
+    answer = re.sub(r'\\[\\[GIF:[^]\\n]*\\]\\]', '', answer, flags=re.I).strip()[:1900]
+    await interaction.followup.send(answer or "Gilbert has nothing to say right now.", ephemeral=interaction.guild is not None)
+    chat_history[channel_id].append(('Gilbert', answer))
+
+
 @bot.event
 async def on_message(message):
-    if message.author.bot or not message.guild:
+    if message.author.bot:
+        return
+    if message.guild is None:
+        if not message.content.strip():
+            return
+        if re.search(r'(?i)\\bgilbert\\b', message.content) or (bot.user and bot.user in message.mentions):
+            chat_history[message.channel.id].append((message.author.display_name, message.content[:350]))
+            await speak(message.channel, f'{message.author.display_name} sent a private DM: {message.content[:500]}\\nReply conversationally.')
         return
     automod = await guild_settings(message.guild.id, 'automod')
     if automod.get('enabled') and not message.author.guild_permissions.manage_messages:
