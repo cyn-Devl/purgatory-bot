@@ -13,6 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands, tasks
 from openai import AsyncOpenAI
+from dashboard_settings import guild_settings, id_list, format_message
 
 GUILD_ID = 1541574758641049670
 PURGATORY_ROLE_ID = 1555374207720755333
@@ -478,6 +479,15 @@ async def on_message(message):
     if message.author.bot or not message.guild:
         return
     await bot.process_commands(message)
+    config = await guild_settings(message.guild.id, 'commands')
+    if config.get('enabled', True) and message.content.startswith('!'):
+        command_name = message.content[1:].split(maxsplit=1)[0].lower()
+        for entry in config.get('entries', []):
+            if isinstance(entry, dict) and entry.get('name') == command_name:
+                response = entry.get('response', '')
+                if isinstance(response, str) and response:
+                    await post(message.channel, response[:1900])
+                break
     if message.channel.id != GENERAL_CHANNEL_ID or not message.content.strip():
         return
     chat_history[message.channel.id].append(
@@ -490,6 +500,41 @@ async def on_message(message):
         await speak(message.channel,
                     f'{message.author.display_name} addressed Gilbert: '
                     f'{message.content[:500]}\nReply directly, briefly and with attitude.')
+
+
+@bot.event
+async def on_member_join(member):
+    welcome = await guild_settings(member.guild.id, 'welcome')
+    if welcome.get('enabled'):
+        channel_id = welcome.get('channelId', '')
+        channel = member.guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+        if channel:
+            await post(channel, format_message(
+                welcome.get('message', 'Welcome {user} to {server}!'), member))
+
+    autoroles = await guild_settings(member.guild.id, 'autoroles')
+    if autoroles.get('enabled'):
+        selected = 'botRoleIds' if member.bot else 'roleIds'
+        me = member.guild.me
+        if me and me.guild_permissions.manage_roles:
+            roles = [member.guild.get_role(rid) for rid in id_list(autoroles.get(selected, ''))]
+            roles = [role for role in roles if role and not role.managed and role < me.top_role]
+            if roles:
+                try:
+                    await member.add_roles(*roles, reason='Gilbert dashboard autoroles')
+                except discord.HTTPException as exc:
+                    print('Autoroles error:', exc)
+
+
+@bot.event
+async def on_member_remove(member):
+    welcome = await guild_settings(member.guild.id, 'welcome')
+    if welcome.get('enabled') and welcome.get('goodbyeEnabled'):
+        channel_id = welcome.get('goodbyeChannelId', '')
+        channel = member.guild.get_channel(int(channel_id)) if str(channel_id).isdigit() else None
+        if channel:
+            await post(channel, format_message(
+                welcome.get('goodbyeMessage', 'Goodbye {user}.'), member))
 
 
 @bot.event
