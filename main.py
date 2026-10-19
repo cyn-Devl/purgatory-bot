@@ -469,13 +469,19 @@ async def find_gif(query):
         return None
 
 
-async def speak(channel, prompt):
+async def speak(channel, prompt, *, premium_options=None):
     if not ai:
         return False
     # One response per channel per 12 seconds, including mentions.
     if time.monotonic() - last_reply[channel.id] < 12:
         return False
     last_reply[channel.id] = time.monotonic()
+    if premium_options:
+        personality = str(premium_options.get('personality', ''))[:400]
+        if personality:
+            prompt += '\nPremium personality preference: ' + personality
+        if premium_options.get('profanity') is not True:
+            prompt += '\nAvoid profanity.'
     async with channel.typing():
         answer = await ask_gemini(channel.id, prompt)
     if not answer or not answer.strip():
@@ -486,7 +492,7 @@ async def speak(channel, prompt):
     if answer:
         await post(channel, answer)
         chat_history[channel.id].append(('Gilbert', answer))
-    if gif_match and random.random() < GIF_CHANCE:
+    if gif_match and (premium_options is None or premium_options.get('gifEnabled') is True) and random.random() < GIF_CHANCE:
         gif_url = await find_gif(gif_match.group(1).strip())
         if gif_url:
             await post(channel, gif_url)
@@ -543,7 +549,8 @@ async def on_message(message):
     if mentioned or named:
         await speak(message.channel,
                     f'{message.author.display_name} addressed Gilbert: '
-                    f'{message.content[:500]}\nReply directly, briefly and with attitude.')
+                    f'{message.content[:500]}\nReply directly, briefly and with attitude.',
+                    premium_options=premium if paid_ai else None)
 
 
 @bot.event
