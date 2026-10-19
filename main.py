@@ -497,6 +497,23 @@ async def speak(channel, prompt):
 async def on_message(message):
     if message.author.bot or not message.guild:
         return
+    automod = await guild_settings(message.guild.id, 'automod')
+    if automod.get('enabled') and not message.author.guild_permissions.manage_messages:
+        ignored = set(id_list(automod.get('ignoredChannelIds', '')))
+        if message.channel.id not in ignored:
+            content = message.content
+            invites = bool(re.search(r'(?:discord\\.gg/|discord(?:app)?\\.com/invite/)', content, re.I))
+            links = bool(re.search(r'https?://|www\\.', content, re.I))
+            mentions = len(set(message.raw_mentions)) + len(set(message.raw_role_mentions))
+            blocked = ((automod.get('blockInvites') and invites)
+                       or (automod.get('blockLinks') and links)
+                       or (mentions > automod.get('maxMentions', 5)))
+            if blocked and message.channel.permissions_for(message.guild.me).manage_messages:
+                try:
+                    await message.delete()
+                    return
+                except discord.HTTPException:
+                    pass
     await bot.process_commands(message)
     config = await guild_settings(message.guild.id, 'commands')
     if config.get('enabled', True) and len(message.content) > 1 and message.content.startswith('!'):
@@ -554,6 +571,52 @@ async def on_member_remove(member):
         if channel:
             await post(channel, format_message(
                 welcome.get('goodbyeMessage', 'Goodbye {user}.'), member))
+
+
+async def reaction_role_change(payload, add):
+    if not payload.guild_id or payload.user_id == bot.user.id:
+        return
+    guild = bot.get_guild(payload.guild_id)
+    if not guild:
+        return
+    settings = await guild_settings(guild.id, 'reaction-roles')
+    if not settings.get('enabled'):
+        return
+    member = guild.get_member(payload.user_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except discord.HTTPException:
+            return
+    me = guild.me
+    if not me or not me.guild_permissions.manage_roles:
+        return
+    for entry in settings.get('entries', []):
+        if not isinstance(entry, dict) or str(entry.get('messageId')) != str(payload.message_id):
+            continue
+        if str(entry.get('emoji')) != str(payload.emoji):
+            continue
+        role_id = entry.get('roleId', '')
+        role = guild.get_role(int(role_id)) if str(role_id).isdigit() else None
+        if not role or role.managed or role >= me.top_role:
+            continue
+        try:
+            if add:
+                await member.add_roles(role, reason='Gilbert reaction role')
+            else:
+                await member.remove_roles(role, reason='Gilbert reaction role')
+        except discord.HTTPException as exc:
+            print('Reaction role error:', exc)
+
+
+@bot.event
+async def on_raw_reaction_add(payload):
+    await reaction_role_change(payload, True)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload):
+    await reaction_role_change(payload, False)
 
 
 @bot.event
