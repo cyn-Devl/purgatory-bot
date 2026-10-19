@@ -85,6 +85,9 @@ role_lock = asyncio.Lock()
 chat_history = defaultdict(lambda: deque(maxlen=16))
 last_reply = defaultdict(float)
 ai_lock = asyncio.Lock()
+usage_lock = asyncio.Lock()
+db.execute('CREATE TABLE IF NOT EXISTS premium_usage (guild_id INTEGER, month TEXT, replies INTEGER DEFAULT 0, PRIMARY KEY(guild_id, month))')
+db.commit()
 
 
 def now():
